@@ -22,28 +22,27 @@ def sampson_error(E: np.ndarray, v: np.ndarray, nu: np.ndarray) -> float:
     return (upT_E_u**2) / denom
 
 
-def ransac_essential(vs: np.ndarray, nus: np.ndarray, iters: int = 1000, thresh: float = 1e-3, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
-    # If OpenCV available, use findEssentialMat on normalized coords
+def ransac_essential(vs: np.ndarray, nus: np.ndarray, iters: int = 2000, thresh: float = 1e-3, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
     if cv2 is not None and vs.shape[0] >= 5:
         pts1 = vs.astype(np.float64).reshape(-1, 1, 2)
         pts2 = nus.astype(np.float64).reshape(-1, 1, 2)
         E, inliers = cv2.findEssentialMat(pts1, pts2, focal=1.0, pp=(0.0, 0.0), method=cv2.RANSAC, prob=0.999, threshold=thresh)
-        if E is not None and inliers is not None:
+        if E is not None and inliers is not None and inliers.sum() >= 5:
             return E, inliers.ravel().astype(bool)
-    # fallback: custom RANSAC
     rng = np.random.default_rng(seed)
     N = vs.shape[0]
     best_inliers = None
     best_E = None
+    sample_size = min(8, N)
     for _ in range(iters):
-        idx = rng.choice(N, size=min(8, N), replace=False)
+        idx = rng.choice(N, size=sample_size, replace=False)
         E = essential_from_correspondences(vs[idx], nus[idx])
         errs = np.array([sampson_error(E, vs[i], nus[i]) for i in range(N)])
         inliers = errs < thresh
         if best_inliers is None or inliers.sum() > best_inliers.sum():
             best_inliers = inliers
             best_E = E
-    if best_inliers is None or best_inliers.sum() < 8:
+    if best_inliers is None or best_inliers.sum() < 5:
         return essential_from_correspondences(vs, nus), np.ones(N, dtype=bool)
     E_refined = essential_from_correspondences(vs[best_inliers], nus[best_inliers])
     return E_refined, best_inliers
@@ -55,25 +54,23 @@ def estimate_relative_pose_from_aod_aoa(aod_list: List[Tuple[float, float]], aoa
     nus = np.array([ao_to_virtual_point(phi, theta) for (phi, theta) in aod_list], dtype=float)
     E, inliers = ransac_essential(vs, nus, seed=seed)
     if cv2 is not None:
-        # recoverPose returns R, t (unit), inliers
         pts1 = vs[inliers].astype(np.float64).reshape(-1, 1, 2)
         pts2 = nus[inliers].astype(np.float64).reshape(-1, 1, 2)
-        _, R, t, inl2 = cv2.recoverPose(E, pts1, pts2, focal=1.0, pp=(0.0, 0.0))
-        if R is not None and t is not None:
-            return R.astype(float), normalize_vector(t.reshape(3)), inliers
-    # fallback: decompose and choose by cheirality
+        _, R0, t0, _ = cv2.recoverPose(E, pts1, pts2, focal=1.0, pp=(0.0, 0.0))
+        if R0 is not None and t0 is not None:
+            return R0.astype(float), normalize_vector(t0.reshape(3)), inliers
     candidates = decompose_essential(E)
     best = candidates[0]
-    best_score = -np.inf
+    best_res = np.inf
     for (R, tdir) in candidates:
-        score = 0
-        for i in np.where(inliers)[0][:min(16, inliers.sum())]:
-            b1 = virtual_point_to_bearing(nus[i])
-            b2 = R @ virtual_point_to_bearing(vs[i])
-            if np.dot(b1, tdir) > 0 and np.dot(b2, -tdir) > 0:
-                score += 1
-        if score > best_score:
-            best_score = score
+        # residual over all correspondences
+        res = 0.0
+        for i in range(len(vs)):
+            u = np.array([vs[i, 0], vs[i, 1], 1.0])
+            up = np.array([nus[i, 0], nus[i, 1], 1.0])
+            res += sampson_error(tdir[:, None] @ np.array([[0, -1, 0],[1, 0, 0],[0, 0, 1]]) @ R, vs[i], nus[i])
+        if res < best_res:
+            best_res = res
             best = (R, tdir)
     return best[0], best[1], inliers
 
@@ -139,7 +136,7 @@ def solve_single_bs_slam(aod_list: List[Tuple[float, float]], aoa_list: List[Tup
     los_flags = detect_los_paths(R, t_dir, aod_list, aoa_list)
     x0 = np.array([s0, B0], dtype=float)
     res = least_squares(residual_scale_bias, x0, args=(R, t_dir, aod_list, aoa_list, delays_arr, los_flags),
-                        bounds=(0, np.inf), loss='soft_l1', f_scale=1e-9, max_nfev=300)
+                        bounds=(0, np.inf), loss='soft_l1', f_scale=1e-9, max_nfev=500)
     scale_opt, B_opt = res.x[0], res.x[1]
     points = triangulate_scatterers(R, t_dir, aod_list, aoa_list, scale_opt, los_flags=los_flags)
     return R, t_dir, scale_opt, B_opt, points, los_flags
