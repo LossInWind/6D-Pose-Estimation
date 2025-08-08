@@ -12,10 +12,11 @@ SRC_DIR = os.path.abspath(os.path.join(CUR_DIR, '..', 'src'))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from pose6d.simulate import simulate_multi_bs_aoa_scene, simulate_single_bs_scene, add_noise
+from pose6d.simulate import simulate_multi_bs_aoa_scene, simulate_single_bs_scene, add_noise, simulate_channel_measurements
 from pose6d.aoa_pose import solve_aoa_only_pose
 from pose6d.slam import solve_single_bs_slam
 from pose6d.se3 import rvec_from_rotation
+from pose6d.channel import OFDMSpec, ArraySpec
 
 
 def rot_angle_deg(R1, R2):
@@ -32,8 +33,9 @@ def cli():
 
 def apply_preset(preset: str) -> dict:
     if preset == 'paper':
-        # tighter angle/delay noise assuming high SNR channel param estimation
-        return dict(angle_noise_deg=0.1, delay_noise_ns=0.2)
+        return dict(angle_noise_deg=0.1, delay_noise_ns=0.2, use_channel_pipeline=True,
+                    ofdm=dict(num_subcarriers=64, delta_f=240e3, f0=60e9),
+                    txN=16, rxN=16, snr_db=25.0)
     return dict()
 
 
@@ -90,6 +92,7 @@ def aoa_pose(trials, num_bs, angle_noise_deg, seed, solver, preset):
 @click.option('--preset', default='default', type=click.Choice(['default', 'paper']))
 def slam(trials, num_paths, include_los, angle_noise_deg, delay_noise_ns, seed, preset):
     overrides = apply_preset(preset)
+    use_channel = overrides.get('use_channel_pipeline', False)
     if 'angle_noise_deg' in overrides:
         angle_noise_deg = overrides['angle_noise_deg']
     if 'delay_noise_ns' in overrides:
@@ -106,7 +109,16 @@ def slam(trials, num_paths, include_los, angle_noise_deg, delay_noise_ns, seed, 
 
     for _ in trange(trials):
         bs, ue_gt, scat_gt, meas = simulate_single_bs_scene(rng, num_paths=num_paths, include_los=include_los)
-        noisy = add_noise(meas, rng, angle_noise_std_rad=angle_noise, delay_noise_std_s=delay_noise)
+        if use_channel:
+            ofdm_cfg = overrides['ofdm']
+            ofdm = OFDMSpec(**ofdm_cfg)
+            tx = ArraySpec(overrides['txN'])
+            rx = ArraySpec(overrides['rxN'])
+            # Use channel to estimate a single dominant path
+            ch_meas = simulate_channel_measurements(rng, bs, ue_gt, scat_gt, include_los, ofdm, tx, rx, snr_db=overrides['snr_db'])
+            noisy = ch_meas
+        else:
+            noisy = add_noise(meas, rng, angle_noise_std_rad=angle_noise, delay_noise_std_s=delay_noise)
         aod = [(m.aod_phi, m.aod_theta) for m in noisy]
         aoa = [(m.aoa_phi, m.aoa_theta) for m in noisy]
         delays = [m.delay_s for m in noisy]
@@ -117,7 +129,10 @@ def slam(trials, num_paths, include_los, angle_noise_deg, delay_noise_ns, seed, 
         if include_los:
             scale_true = np.linalg.norm(ue_gt.position_w - bs.position_w)
             scale_rel_err.append(abs(scale - scale_true) / max(scale_true, 1e-6))
-        bias_err_ns.append(abs(B - (noisy[0].delay_s - np.linalg.norm(ue_gt.position_w - bs.position_w)/299792458.0)) * 1e9 if include_los else abs(B) * 1e9)
+            # Bias only defined with LoS in this simple evaluator
+            bias_err_ns.append(abs(B - (np.linalg.norm(ue_gt.position_w - bs.position_w)/299792458.0)) * 1e9)
+        else:
+            bias_err_ns.append(abs(B) * 1e9)
 
     out = {
         'task': 'single_bs_slam',
@@ -127,6 +142,7 @@ def slam(trials, num_paths, include_los, angle_noise_deg, delay_noise_ns, seed, 
         'angle_noise_deg': angle_noise_deg,
         'delay_noise_ns': delay_noise_ns,
         'preset': preset,
+        'use_channel': use_channel,
         'position_rmse_m': float(np.sqrt(np.mean(np.array(pos_err)**2))),
         'rotation_mae_deg': float(np.mean(np.array(rot_err))),
         'scale_rel_mae': float(np.mean(scale_rel_err)) if include_los else None,
