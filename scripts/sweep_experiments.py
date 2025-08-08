@@ -23,11 +23,12 @@ def rot_angle_deg(R1, R2):
     return math.degrees(math.acos(cosang))
 
 
-def sweep_snr_and_paths(trials=100, snr_list=(10,15,20,25,30), path_list=(3,5,8), include_los=True, seed=0):
+def sweep_snr_and_paths(trials=100, snr_list=(5,10,15,20,25,30,35), path_list=(3,5,8,12), include_los=True, seed=0):
     rng = np.random.default_rng(seed)
-    ofdm = OFDMSpec(num_subcarriers=64, delta_f=240e3, f0=60e9)
-    tx = ArraySpec(16)
-    rx = ArraySpec(16)
+    # Wider bandwidth and larger arrays (closer to mmWave setups)
+    ofdm = OFDMSpec(num_subcarriers=128, delta_f=240e3, f0=60e9)
+    tx = ArraySpec(36)   # 6x6
+    rx = ArraySpec(36)   # 6x6
     results = []
     for snr_db in snr_list:
         for num_paths in path_list:
@@ -50,10 +51,8 @@ def sweep_snr_and_paths(trials=100, snr_list=(10,15,20,25,30), path_list=(3,5,8)
                     s_true = np.linalg.norm(ue_gt.position_w - bs.position_w)
                     scale_rel.append(abs(scale - s_true) / max(s_true, 1e-6))
                     bias_ns.append(abs(B - (s_true/299792458.0)) * 1e9)
-            # simple CRB for a nominal single path (angles from first meas if available)
             if len(meas) > 0:
                 nominal = PathParam(meas[0].aod_phi, meas[0].aod_theta, meas[0].aoa_phi, meas[0].aoa_theta, meas[0].delay_s, 1.0+0j)
-                # estimate noise variance from SNR (unit signal power assumed)
                 sigma2 = 10**(-snr_db/10.0)
                 var, _, _ = numerical_crb(ofdm, tx, rx, nominal, sigma2=sigma2)
                 crb = {
@@ -81,4 +80,4 @@ def sweep_snr_and_paths(trials=100, snr_list=(10,15,20,25,30), path_list=(3,5,8)
 
 
 if __name__ == '__main__':
-    sweep_snr_and_paths(trials=20)
+    sweep_snr_and_paths(trials=50)

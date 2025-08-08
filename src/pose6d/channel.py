@@ -1,6 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from .array import ura_steering_vector, ura_shape
 from .projective import C0
 
@@ -75,31 +75,36 @@ def _parabolic_peak_refine(y: np.ndarray, k: int) -> float:
     return k + delta
 
 
-def _quad2d_refine(P: np.ndarray, i: int, j: int, dphi: float, dth: float) -> Tuple[float, float]:
-    # Fit 2D quadratic z = ax^2 + by^2 + cxy + dx + ey + f on 3x3 neighborhood
+def _quad2d_refine_weighted(P: np.ndarray, i: int, j: int, dphi: float, dth: float, window: int = 5) -> Tuple[float, float]:
+    # Weighted 2D quadratic fit on (window x window) neighborhood centered at (i,j)
     h, w = P.shape
-    i = int(np.clip(i, 1, h-2))
-    j = int(np.clip(j, 1, w-2))
-    Z = P[i-1:i+2, j-1:j+2]
-    xs, ys = np.meshgrid([-dphi, 0.0, dphi], [-dth, 0.0, dth], indexing='ij')
-    A = np.stack([xs.ravel()**2, ys.ravel()**2, (xs*ys).ravel(), xs.ravel(), ys.ravel(), np.ones(9)], axis=1)
-    coef, *_ = np.linalg.lstsq(A, Z.ravel(), rcond=None)
+    half = window // 2
+    i = int(np.clip(i, half, h - half - 1))
+    j = int(np.clip(j, half, w - half - 1))
+    Z = P[i-half:i+half+1, j-half:j+half+1]
+    xs = np.arange(-half, half+1) * dphi
+    ys = np.arange(-half, half+1) * dth
+    XX, YY = np.meshgrid(xs, ys, indexing='ij')
+    A = np.stack([XX.ravel()**2, YY.ravel()**2, (XX*YY).ravel(), XX.ravel(), YY.ravel(), np.ones(window*window)], axis=1)
+    z = Z.ravel()
+    # weights proportional to power (normalized)
+    wts = (z - z.min()) / (z.max() - z.min() + 1e-12) + 1e-3
+    W = np.diag(wts)
+    coef, *_ = np.linalg.lstsq(W @ A, W @ z, rcond=None)
     a, b, c, d, e, f0 = coef
-    # Stationary point solves gradient = 0
-    # [2a x + c y + d = 0, c x + 2b y + e = 0]
     M = np.array([[2*a, c], [c, 2*b]])
     v = -np.array([d, e])
     try:
         sol = np.linalg.solve(M, v)
-        dx, dy = sol[0], sol[1]
-        dx = float(np.clip(dx, -dphi, dphi))
-        dy = float(np.clip(dy, -dth, dth))
+        dx, dy = float(sol[0]), float(sol[1])
+        dx = float(np.clip(dx, -half*dphi, half*dphi))
+        dy = float(np.clip(dy, -half*dth, half*dth))
     except np.linalg.LinAlgError:
         dx, dy = 0.0, 0.0
     return dx, dy
 
 
-def _music_peak(R: np.ndarray, Nx: int, Ny: int, d_over_lambda: float, grid_size: int = 31, refine: bool = True) -> Tuple[float, float]:
+def _music_peak(R: np.ndarray, Nx: int, Ny: int, d_over_lambda: float, grid_size: int = 31, refine: bool = True, window: int = 5) -> Tuple[float, float]:
     eigvals, eigvecs = np.linalg.eigh(R)
     idx = np.argsort(eigvals)
     eigvecs = eigvecs[:, idx]
@@ -117,7 +122,7 @@ def _music_peak(R: np.ndarray, Nx: int, Ny: int, d_over_lambda: float, grid_size
     if refine:
         dphi = phis[1] - phis[0]
         dth = thetas[1] - thetas[0]
-        dx, dy = _quad2d_refine(P, imax, jmax, dphi, dth)
+        dx, dy = _quad2d_refine_weighted(P, imax, jmax, dphi, dth, window=window)
         phi_hat += dx
         th_hat += dy
     return phi_hat, th_hat
@@ -129,13 +134,10 @@ def _refine_tau_phase_slope(H: np.ndarray, ofdm: OFDMSpec, aod_phi: float, aod_t
     Nx_r, Ny_r = rx.shape
     at = ura_steering_vector(aod_phi, aod_theta, Nx_t, Ny_t, tx.d_over_lambda)
     ar = ura_steering_vector(aoa_phi, aoa_theta, Nx_r, Ny_r, rx.d_over_lambda)
-    # Project per subcarrier onto rank-1 steering
     y = np.array([np.vdot(np.outer(ar, at.conj()), H[:, :, n]) for n in range(Nf)])
-    # Unwrap phase vs frequency and fit slope
     n = np.arange(Nf)
     f = ofdm.f0 + (n - (Nf-1)/2.0) * ofdm.delta_f
     ang = np.unwrap(np.angle(y))
-    # LS slope: minimize ||ang - (-2π τ f + b)||
     A = np.stack([-2*np.pi*f, np.ones_like(f)], axis=1)
     coef, *_ = np.linalg.lstsq(A, ang, rcond=None)
     tau = coef[0]
@@ -143,7 +145,7 @@ def _refine_tau_phase_slope(H: np.ndarray, ofdm: OFDMSpec, aod_phi: float, aod_t
 
 
 def estimate_multipath_params(snapshot: ChannelSnapshot, max_paths: int = 3, zpf: int = 8, grid_size: int = 37,
-                               peak_prominence: float = 0.2, use_music: bool = True, num_subbands: int = 4) -> List[Tuple[float, float, float, float, float, complex]]:
+                               peak_prominence: float = 0.2, use_music: bool = True, num_subbands: int = 4, snr_db: Optional[float] = None) -> List[Tuple[float, float, float, float, float, complex]]:
     H = snapshot.Hn
     Nr, Nt, Nf = H.shape
     Nx_t, Ny_t = snapshot.tx.shape
@@ -162,9 +164,16 @@ def estimate_multipath_params(snapshot: ChannelSnapshot, max_paths: int = 3, zpf
         peak_idxs = [int(np.argmax(mag))]
     paths_out = []
 
-    # Subband partitions for multi-snapshot covariance
     n = np.arange(Nf)
     f = ofdm.f0 + (n - (Nf-1)/2.0) * ofdm.delta_f
+    # adaptive subbands: fewer subbands at低SNR以聚合能量，更多子带在高SNR以多快照稳健
+    if snr_db is not None:
+        if snr_db < 10:
+            num_subbands = 1
+        elif snr_db < 20:
+            num_subbands = 2
+        else:
+            num_subbands = 4
     splits = np.array_split(np.arange(Nf), num_subbands) if num_subbands > 1 else [np.arange(Nf)]
 
     for idx in peak_idxs:
@@ -183,8 +192,8 @@ def estimate_multipath_params(snapshot: ChannelSnapshot, max_paths: int = 3, zpf
         Rs /= max(len(splits), 1)
         Ts /= max(len(splits), 1)
         if use_music and min(Nr, Nt) >= 3:
-            aoa_phi, aoa_theta = _music_peak(Rs, Nx_r, Ny_r, snapshot.rx.d_over_lambda, grid_size=max(31, grid_size))
-            aod_phi, aod_theta = _music_peak(Ts, Nx_t, Ny_t, snapshot.tx.d_over_lambda, grid_size=max(31, grid_size))
+            aoa_phi, aoa_theta = _music_peak(Rs, Nx_r, Ny_r, snapshot.rx.d_over_lambda, grid_size=max(41, grid_size), window=5)
+            aod_phi, aod_theta = _music_peak(Ts, Nx_t, Ny_t, snapshot.tx.d_over_lambda, grid_size=max(41, grid_size), window=5)
         else:
             Y = np.mean(np.stack(Ys, axis=0), axis=0)
             U, S, Vh = np.linalg.svd(Y, full_matrices=False)
