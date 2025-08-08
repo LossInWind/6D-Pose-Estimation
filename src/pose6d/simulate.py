@@ -132,6 +132,6 @@ def simulate_channel_measurements(rng: np.random.Generator, bs: BS, ue: UE, scat
         gain = (0.5 + 0.5j)
         paths.append(PathParam(phi_bs, theta_bs, phi_ue, theta_ue, tau, gain=gain))
     snap = simulate_snapshot(paths, ofdm, tx, rx, snr_db=snr_db, rng=rng)
-    est = estimate_multipath_params(snap, max_paths=max_paths, zpf=8, grid_size=37)
+    est = estimate_multipath_params(snap, max_paths=max_paths, zpf=8, grid_size=41, snr_db=snr_db)
     meas = [PathMeasurement(p[0], p[1], p[2], p[3], p[4], float(np.abs(p[5]))) for p in est]
     return meas
