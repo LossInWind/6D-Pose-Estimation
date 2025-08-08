@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Tuple, List
 from .se3 import rotation_from_rvec, normalize_vector
 from .projective import sph_to_cart, cart_to_sph, ao_to_virtual_point, C0
-from .channel import ArraySpec, OFDMSpec, PathParam, simulate_snapshot, estimate_params
+from .channel import ArraySpec, OFDMSpec, PathParam, simulate_snapshot, estimate_multipath_params
 
 
 @dataclass
@@ -113,15 +113,13 @@ def simulate_multi_bs_aoa_scene(rng: np.random.Generator, num_bs: int = 4,
 
 
 def simulate_channel_measurements(rng: np.random.Generator, bs: BS, ue: UE, scatterers: List[np.ndarray], include_los: bool,
-                                  ofdm: OFDMSpec, tx: ArraySpec, rx: ArraySpec, snr_db: float = 30.0) -> List[PathMeasurement]:
+                                  ofdm: OFDMSpec, tx: ArraySpec, rx: ArraySpec, snr_db: float = 30.0,
+                                  max_paths: int = 3) -> List[PathMeasurement]:
     paths: List[PathParam] = []
     if include_los:
         d_bs_to_ue = ue.position_w - bs.position_w
-        d_bs_local = normalize_vector(d_bs_to_ue)
-        # AoD at BS local (assume BS local = world for now)
-        phi_bs, theta_bs = cart_to_sph(d_bs_local)
-        d_ue_in_local = normalize_vector(ue.position_w - bs.position_w)
-        phi_ue, theta_ue = cart_to_sph(ue.rotation_w.T @ d_ue_in_local)
+        phi_bs, theta_bs = cart_to_sph(normalize_vector(d_bs_to_ue))
+        phi_ue, theta_ue = cart_to_sph(ue.rotation_w.T @ normalize_vector(ue.position_w - bs.position_w))
         tau = np.linalg.norm(d_bs_to_ue) / C0
         paths.append(PathParam(phi_bs, theta_bs, phi_ue, theta_ue, tau, gain=1.0+0j))
     for p in scatterers:
@@ -130,9 +128,9 @@ def simulate_channel_measurements(rng: np.random.Generator, bs: BS, ue: UE, scat
         d_in_local = ue.rotation_w.T @ normalize_vector(ue.position_w - p)
         phi_ue, theta_ue = cart_to_sph(d_in_local)
         tau = (np.linalg.norm(p - bs.position_w) + np.linalg.norm(ue.position_w - p)) / C0
-        gain = (0.5 + 0.5j)  # simple fixed gain
+        gain = (0.5 + 0.5j)
         paths.append(PathParam(phi_bs, theta_bs, phi_ue, theta_ue, tau, gain=gain))
     snap = simulate_snapshot(paths, ofdm, tx, rx, snr_db=snr_db, rng=rng)
-    est = estimate_params(snap, grid_size=25)[0]
-    (aod_phi, aod_theta, aoa_phi, aoa_theta, tau_est, _g) = est
-    return [PathMeasurement(aod_phi, aod_theta, aoa_phi, aoa_theta, tau_est)]
+    est = estimate_multipath_params(snap, max_paths=max_paths, zpf=8, grid_size=37)
+    meas = [PathMeasurement(p[0], p[1], p[2], p[3], p[4]) for p in est]
+    return meas
