@@ -11,6 +11,18 @@ except Exception:  # pragma: no cover
     cv2 = None
 
 
+def _enforce_rank2(E: np.ndarray, vs: Optional[np.ndarray] = None, nus: Optional[np.ndarray] = None) -> np.ndarray:
+    if E.shape == (3, 3):
+        U, S, Vt = np.linalg.svd(E)
+        S[2] = 0.0
+        return U @ np.diag(S) @ Vt
+    # if E is not 3x3 (e.g., returned by findEssentialMat as a stack), recompute via correspondences
+    if vs is not None and nus is not None:
+        return essential_from_correspondences(vs, nus)
+    # fallback: take first 3x3
+    return E[:3, :3]
+
+
 def sampson_error(E: np.ndarray, v: np.ndarray, nu: np.ndarray) -> float:
     u = np.array([v[0], v[1], 1.0])
     up = np.array([nu[0], nu[1], 1.0])
@@ -23,19 +35,18 @@ def sampson_error(E: np.ndarray, v: np.ndarray, nu: np.ndarray) -> float:
 
 
 def ransac_essential_weighted(vs: np.ndarray, nus: np.ndarray, weights: np.ndarray, iters: int = 3000, thresh: float = 1e-3, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
-    # Use OpenCV if available (no direct weights), then apply weight filter
     if cv2 is not None and vs.shape[0] >= 5:
         pts1 = vs.astype(np.float64).reshape(-1, 1, 2)
         pts2 = nus.astype(np.float64).reshape(-1, 1, 2)
         E, inliers = cv2.findEssentialMat(pts1, pts2, focal=1.0, pp=(0.0, 0.0), method=cv2.RANSAC, prob=0.999, threshold=thresh)
         if E is not None and inliers is not None and inliers.sum() >= 5:
             inl = inliers.ravel().astype(bool)
-            # keep top weighted inliers
             idx = np.where(inl)[0]
             idx_sorted = idx[np.argsort(weights[idx])[::-1]]
             keep = np.zeros_like(inl)
             keep[idx_sorted[:max(5, len(idx_sorted)//1)]] = True
-            return E, keep
+            E3 = _enforce_rank2(E, vs[keep], nus[keep])
+            return E3, keep
     rng = np.random.default_rng(seed)
     N = vs.shape[0]
     best_score = -np.inf
@@ -53,10 +64,9 @@ def ransac_essential_weighted(vs: np.ndarray, nus: np.ndarray, weights: np.ndarr
             best_E = E
             best_inl = inliers
     if best_inl is None or best_inl.sum() < 5:
-        return essential_from_correspondences(vs, nus), np.ones(N, dtype=bool)
-    # re-estimate E on weighted inliers (use all inliers for now)
+        return _enforce_rank2(essential_from_correspondences(vs, nus)), np.ones(N, dtype=bool)
     E_refined = essential_from_correspondences(vs[best_inl], nus[best_inl])
-    return E_refined, best_inl
+    return _enforce_rank2(E_refined), best_inl
 
 
 def estimate_relative_pose_from_aod_aoa(aod_list: List[Tuple[float, float]], aoa_list: List[Tuple[float, float]], weights: Optional[np.ndarray] = None, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -66,7 +76,6 @@ def estimate_relative_pose_from_aod_aoa(aod_list: List[Tuple[float, float]], aoa
     if weights is None:
         weights = np.ones(len(vs))
     E, inliers = ransac_essential_weighted(vs, nus, weights, seed=seed)
-    # Candidate scoring: combined Sampson error + angle alignment with weights
     candidates = []
     if cv2 is not None:
         pts1 = vs[inliers].astype(np.float64).reshape(-1, 1, 2)
@@ -84,10 +93,8 @@ def estimate_relative_pose_from_aod_aoa(aod_list: List[Tuple[float, float]], aoa
             w = weights[i]
             b1 = virtual_point_to_bearing(nus[i])
             b2 = R @ virtual_point_to_bearing(vs[i])
-            # angle misalignment
             ang = np.arccos(np.clip(np.dot(b1, -b2), -1.0, 1.0))
             cost += w * ang**2
-            # Sampson error
             cost += w * sampson_error(E, vs[i], nus[i])
         if cost < best_cost:
             best_cost = cost

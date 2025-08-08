@@ -67,13 +67,36 @@ def estimate_params(snapshot: ChannelSnapshot, grid_size: int = 37) -> List[Tupl
 
 
 def _parabolic_peak_refine(y: np.ndarray, k: int) -> float:
-    # Returns refined index position (float) around k
     k = int(np.clip(k, 1, len(y)-2))
     ym1, y0, yp1 = y[k-1], y[k], y[k+1]
     denom = (ym1 - 2*y0 + yp1) + 1e-18
     delta = 0.5 * (ym1 - yp1) / denom
     delta = float(np.clip(delta, -1.0, 1.0))
     return k + delta
+
+
+def _quad2d_refine(P: np.ndarray, i: int, j: int, dphi: float, dth: float) -> Tuple[float, float]:
+    # Fit 2D quadratic z = ax^2 + by^2 + cxy + dx + ey + f on 3x3 neighborhood
+    h, w = P.shape
+    i = int(np.clip(i, 1, h-2))
+    j = int(np.clip(j, 1, w-2))
+    Z = P[i-1:i+2, j-1:j+2]
+    xs, ys = np.meshgrid([-dphi, 0.0, dphi], [-dth, 0.0, dth], indexing='ij')
+    A = np.stack([xs.ravel()**2, ys.ravel()**2, (xs*ys).ravel(), xs.ravel(), ys.ravel(), np.ones(9)], axis=1)
+    coef, *_ = np.linalg.lstsq(A, Z.ravel(), rcond=None)
+    a, b, c, d, e, f0 = coef
+    # Stationary point solves gradient = 0
+    # [2a x + c y + d = 0, c x + 2b y + e = 0]
+    M = np.array([[2*a, c], [c, 2*b]])
+    v = -np.array([d, e])
+    try:
+        sol = np.linalg.solve(M, v)
+        dx, dy = sol[0], sol[1]
+        dx = float(np.clip(dx, -dphi, dphi))
+        dy = float(np.clip(dy, -dth, dth))
+    except np.linalg.LinAlgError:
+        dx, dy = 0.0, 0.0
+    return dx, dy
 
 
 def _music_peak(R: np.ndarray, Nx: int, Ny: int, d_over_lambda: float, grid_size: int = 31, refine: bool = True) -> Tuple[float, float]:
@@ -92,17 +115,31 @@ def _music_peak(R: np.ndarray, Nx: int, Ny: int, d_over_lambda: float, grid_size
     imax, jmax = np.unravel_index(np.argmax(P), P.shape)
     phi_hat, th_hat = phis[imax], thetas[jmax]
     if refine:
-        def quad_refine(vals, grid, idx):
-            if idx <= 0 or idx >= len(grid)-1:
-                return grid[idx]
-            ym1, y0, yp1 = vals[idx-1], vals[idx], vals[idx+1]
-            denom = (ym1 - 2*y0 + yp1) + 1e-12
-            delta = 0.5 * (ym1 - yp1) / denom
-            delta = np.clip(delta, -1.0, 1.0)
-            return grid[idx] + delta * (grid[1] - grid[0])
-        phi_hat = quad_refine(P[:, jmax], phis, imax)
-        th_hat = quad_refine(P[imax, :], thetas, jmax)
+        dphi = phis[1] - phis[0]
+        dth = thetas[1] - thetas[0]
+        dx, dy = _quad2d_refine(P, imax, jmax, dphi, dth)
+        phi_hat += dx
+        th_hat += dy
     return phi_hat, th_hat
+
+
+def _refine_tau_phase_slope(H: np.ndarray, ofdm: OFDMSpec, aod_phi: float, aod_theta: float, aoa_phi: float, aoa_theta: float, tx: ArraySpec, rx: ArraySpec) -> float:
+    Nr, Nt, Nf = H.shape
+    Nx_t, Ny_t = tx.shape
+    Nx_r, Ny_r = rx.shape
+    at = ura_steering_vector(aod_phi, aod_theta, Nx_t, Ny_t, tx.d_over_lambda)
+    ar = ura_steering_vector(aoa_phi, aoa_theta, Nx_r, Ny_r, rx.d_over_lambda)
+    # Project per subcarrier onto rank-1 steering
+    y = np.array([np.vdot(np.outer(ar, at.conj()), H[:, :, n]) for n in range(Nf)])
+    # Unwrap phase vs frequency and fit slope
+    n = np.arange(Nf)
+    f = ofdm.f0 + (n - (Nf-1)/2.0) * ofdm.delta_f
+    ang = np.unwrap(np.angle(y))
+    # LS slope: minimize ||ang - (-2π τ f + b)||
+    A = np.stack([-2*np.pi*f, np.ones_like(f)], axis=1)
+    coef, *_ = np.linalg.lstsq(A, ang, rcond=None)
+    tau = coef[0]
+    return float(tau)
 
 
 def estimate_multipath_params(snapshot: ChannelSnapshot, max_paths: int = 3, zpf: int = 8, grid_size: int = 37,
@@ -124,17 +161,15 @@ def estimate_multipath_params(snapshot: ChannelSnapshot, max_paths: int = 3, zpf
     if len(peak_idxs) == 0:
         peak_idxs = [int(np.argmax(mag))]
     paths_out = []
-    n = np.arange(Nf)
-    f = ofdm.f0 + (n - (Nf-1)/2.0) * ofdm.delta_f
 
     # Subband partitions for multi-snapshot covariance
+    n = np.arange(Nf)
+    f = ofdm.f0 + (n - (Nf-1)/2.0) * ofdm.delta_f
     splits = np.array_split(np.arange(Nf), num_subbands) if num_subbands > 1 else [np.arange(Nf)]
 
     for idx in peak_idxs:
-        # Parabolic interpolation for delay
         k_ref = _parabolic_peak_refine(mag, idx)
         tau_est = k_ref / (Nfft * ofdm.delta_f)
-        # Form per-subband Y_k matrices with phase compensation
         Rs = np.zeros((Nr, Nr), dtype=complex)
         Ts = np.zeros((Nt, Nt), dtype=complex)
         Ys = []
@@ -173,8 +208,11 @@ def estimate_multipath_params(snapshot: ChannelSnapshot, max_paths: int = 3, zpf
                         best_t = (score, phi_t, th_t)
             _, aoa_phi, aoa_theta = best_r
             _, aod_phi, aod_theta = best_t
-        # gain LS using the average Y
-        Y = np.mean(np.stack(Ys, axis=0), axis=0)
+        # refine tau via phase slope using angle estimates
+        tau_est = _refine_tau_phase_slope(H, ofdm, aod_phi, aod_theta, aoa_phi, aoa_theta, snapshot.tx, snapshot.rx)
+        # gain LS using the average Y at refined tau
+        phase = np.exp(1j * 2.0 * np.pi * f * tau_est)
+        Y = (H * phase[None, None, :]).sum(axis=2)
         at = ura_steering_vector(aod_phi, aod_theta, Nx_t, Ny_t, snapshot.tx.d_over_lambda)
         ar = ura_steering_vector(aoa_phi, aoa_theta, Nx_r, Ny_r, snapshot.rx.d_over_lambda)
         A = np.outer(ar, at.conj())
