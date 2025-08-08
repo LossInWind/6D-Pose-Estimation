@@ -1,12 +1,13 @@
 {
   "task": "single_bs_slam",
-  "trials": 3,
-  "num_paths": 8,
-  "include_los": false,
-  "angle_noise_deg": 0.5,
-  "delay_noise_ns": 2.0,
-  "position_rmse_m": 156.98546617566737,
-  "rotation_mae_deg": 113.12058430808248,
-  "scale_rel_mae": null,
-  "clock_bias_mae_ns": 0.10000000000000002
+  "trials": 5,
+  "num_paths": 10,
+  "include_los": true,
+  "angle_noise_deg": 0.1,
+  "delay_noise_ns": 0.2,
+  "preset": "paper",
+  "position_rmse_m": 153.69313213003338,
+  "rotation_mae_deg": 72.17658004335419,
+  "scale_rel_mae": 39.80536297607138,
+  "clock_bias_mae_ns": 499.88588117646816
 }
