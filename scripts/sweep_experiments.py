@@ -12,7 +12,8 @@ if SRC_DIR not in sys.path:
 
 from pose6d.simulate import simulate_single_bs_scene, simulate_channel_measurements
 from pose6d.slam import solve_single_bs_slam
-from pose6d.channel import OFDMSpec, ArraySpec
+from pose6d.channel import OFDMSpec, ArraySpec, PathParam
+from pose6d.crb import numerical_crb
 
 
 def rot_angle_deg(R1, R2):
@@ -49,6 +50,21 @@ def sweep_snr_and_paths(trials=100, snr_list=(10,15,20,25,30), path_list=(3,5,8)
                     s_true = np.linalg.norm(ue_gt.position_w - bs.position_w)
                     scale_rel.append(abs(scale - s_true) / max(s_true, 1e-6))
                     bias_ns.append(abs(B - (s_true/299792458.0)) * 1e9)
+            # simple CRB for a nominal single path (angles from first meas if available)
+            if len(meas) > 0:
+                nominal = PathParam(meas[0].aod_phi, meas[0].aod_theta, meas[0].aoa_phi, meas[0].aoa_theta, meas[0].delay_s, 1.0+0j)
+                # estimate noise variance from SNR (unit signal power assumed)
+                sigma2 = 10**(-snr_db/10.0)
+                var, _, _ = numerical_crb(ofdm, tx, rx, nominal, sigma2=sigma2)
+                crb = {
+                    'var_aod_phi': float(var[0]),
+                    'var_aod_theta': float(var[1]),
+                    'var_aoa_phi': float(var[2]),
+                    'var_aoa_theta': float(var[3]),
+                    'var_tau': float(var[4]),
+                }
+            else:
+                crb = None
             results.append({
                 'snr_db': snr_db,
                 'num_paths': num_paths,
@@ -56,6 +72,7 @@ def sweep_snr_and_paths(trials=100, snr_list=(10,15,20,25,30), path_list=(3,5,8)
                 'rotation_mae_deg': float(np.mean(np.array(rot_err))),
                 'scale_rel_mae': float(np.mean(scale_rel)) if include_los else None,
                 'clock_bias_mae_ns': float(np.mean(bias_ns)) if include_los else None,
+                'crb': crb,
             })
     os.makedirs('outputs', exist_ok=True)
     with open('outputs/sweep_snr_paths.json', 'w') as f:
