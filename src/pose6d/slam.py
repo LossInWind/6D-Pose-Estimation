@@ -22,55 +22,75 @@ def sampson_error(E: np.ndarray, v: np.ndarray, nu: np.ndarray) -> float:
     return (upT_E_u**2) / denom
 
 
-def ransac_essential(vs: np.ndarray, nus: np.ndarray, iters: int = 2000, thresh: float = 1e-3, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
+def ransac_essential_weighted(vs: np.ndarray, nus: np.ndarray, weights: np.ndarray, iters: int = 3000, thresh: float = 1e-3, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
+    # Use OpenCV if available (no direct weights), then apply weight filter
     if cv2 is not None and vs.shape[0] >= 5:
         pts1 = vs.astype(np.float64).reshape(-1, 1, 2)
         pts2 = nus.astype(np.float64).reshape(-1, 1, 2)
         E, inliers = cv2.findEssentialMat(pts1, pts2, focal=1.0, pp=(0.0, 0.0), method=cv2.RANSAC, prob=0.999, threshold=thresh)
         if E is not None and inliers is not None and inliers.sum() >= 5:
-            return E, inliers.ravel().astype(bool)
+            inl = inliers.ravel().astype(bool)
+            # keep top weighted inliers
+            idx = np.where(inl)[0]
+            idx_sorted = idx[np.argsort(weights[idx])[::-1]]
+            keep = np.zeros_like(inl)
+            keep[idx_sorted[:max(5, len(idx_sorted)//1)]] = True
+            return E, keep
     rng = np.random.default_rng(seed)
     N = vs.shape[0]
-    best_inliers = None
+    best_score = -np.inf
     best_E = None
+    best_inl = None
     sample_size = min(8, N)
     for _ in range(iters):
         idx = rng.choice(N, size=sample_size, replace=False)
         E = essential_from_correspondences(vs[idx], nus[idx])
         errs = np.array([sampson_error(E, vs[i], nus[i]) for i in range(N)])
         inliers = errs < thresh
-        if best_inliers is None or inliers.sum() > best_inliers.sum():
-            best_inliers = inliers
+        score = weights[inliers].sum()
+        if score > best_score:
+            best_score = score
             best_E = E
-    if best_inliers is None or best_inliers.sum() < 5:
+            best_inl = inliers
+    if best_inl is None or best_inl.sum() < 5:
         return essential_from_correspondences(vs, nus), np.ones(N, dtype=bool)
-    E_refined = essential_from_correspondences(vs[best_inliers], nus[best_inliers])
-    return E_refined, best_inliers
+    # re-estimate E on weighted inliers (use all inliers for now)
+    E_refined = essential_from_correspondences(vs[best_inl], nus[best_inl])
+    return E_refined, best_inl
 
 
-def estimate_relative_pose_from_aod_aoa(aod_list: List[Tuple[float, float]], aoa_list: List[Tuple[float, float]], seed: int = 0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def estimate_relative_pose_from_aod_aoa(aod_list: List[Tuple[float, float]], aoa_list: List[Tuple[float, float]], weights: Optional[np.ndarray] = None, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     assert len(aod_list) == len(aoa_list)
     vs = np.array([ao_to_virtual_point(phi, theta) for (phi, theta) in aoa_list], dtype=float)
     nus = np.array([ao_to_virtual_point(phi, theta) for (phi, theta) in aod_list], dtype=float)
-    E, inliers = ransac_essential(vs, nus, seed=seed)
+    if weights is None:
+        weights = np.ones(len(vs))
+    E, inliers = ransac_essential_weighted(vs, nus, weights, seed=seed)
+    # Candidate scoring: combined Sampson error + angle alignment with weights
+    candidates = []
     if cv2 is not None:
         pts1 = vs[inliers].astype(np.float64).reshape(-1, 1, 2)
         pts2 = nus[inliers].astype(np.float64).reshape(-1, 1, 2)
-        _, R0, t0, _ = cv2.recoverPose(E, pts1, pts2, focal=1.0, pp=(0.0, 0.0))
+        _ok, R0, t0, _ = cv2.recoverPose(E, pts1, pts2, focal=1.0, pp=(0.0, 0.0))
         if R0 is not None and t0 is not None:
-            return R0.astype(float), normalize_vector(t0.reshape(3)), inliers
-    candidates = decompose_essential(E)
+            candidates.append((R0.astype(float), normalize_vector(t0.reshape(3))))
+    if not candidates:
+        candidates = decompose_essential(E)
     best = candidates[0]
-    best_res = np.inf
+    best_cost = np.inf
     for (R, tdir) in candidates:
-        # residual over all correspondences
-        res = 0.0
+        cost = 0.0
         for i in range(len(vs)):
-            u = np.array([vs[i, 0], vs[i, 1], 1.0])
-            up = np.array([nus[i, 0], nus[i, 1], 1.0])
-            res += sampson_error(tdir[:, None] @ np.array([[0, -1, 0],[1, 0, 0],[0, 0, 1]]) @ R, vs[i], nus[i])
-        if res < best_res:
-            best_res = res
+            w = weights[i]
+            b1 = virtual_point_to_bearing(nus[i])
+            b2 = R @ virtual_point_to_bearing(vs[i])
+            # angle misalignment
+            ang = np.arccos(np.clip(np.dot(b1, -b2), -1.0, 1.0))
+            cost += w * ang**2
+            # Sampson error
+            cost += w * sampson_error(E, vs[i], nus[i])
+        if cost < best_cost:
+            best_cost = cost
             best = (R, tdir)
     return best[0], best[1], inliers
 
@@ -128,8 +148,8 @@ def residual_scale_bias(x: np.ndarray, R: np.ndarray, t_dir: np.ndarray,
 
 
 def solve_single_bs_slam(aod_list: List[Tuple[float, float]], aoa_list: List[Tuple[float, float]], delays: List[float],
-                         s0: Optional[float] = None, B0: float = 0.0, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, float, float, List[Optional[np.ndarray]], np.ndarray]:
-    R, t_dir, inliers = estimate_relative_pose_from_aod_aoa(aod_list, aoa_list, seed=seed)
+                         s0: Optional[float] = None, B0: float = 0.0, seed: int = 0, weights: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, float, float, List[Optional[np.ndarray]], np.ndarray]:
+    R, t_dir, inliers = estimate_relative_pose_from_aod_aoa(aod_list, aoa_list, weights=weights, seed=seed)
     delays_arr = np.array(delays, dtype=float)
     if s0 is None:
         s0 = max(C0 * np.percentile(delays_arr, 10), 1.0)

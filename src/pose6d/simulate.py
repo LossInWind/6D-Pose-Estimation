@@ -25,6 +25,7 @@ class PathMeasurement:
     aoa_phi: float
     aoa_theta: float
     delay_s: float
+    weight: float = 1.0
 
 
 def random_rotation(rng: np.random.Generator) -> np.ndarray:
@@ -132,5 +133,5 @@ def simulate_channel_measurements(rng: np.random.Generator, bs: BS, ue: UE, scat
         paths.append(PathParam(phi_bs, theta_bs, phi_ue, theta_ue, tau, gain=gain))
     snap = simulate_snapshot(paths, ofdm, tx, rx, snr_db=snr_db, rng=rng)
     est = estimate_multipath_params(snap, max_paths=max_paths, zpf=8, grid_size=37)
-    meas = [PathMeasurement(p[0], p[1], p[2], p[3], p[4]) for p in est]
+    meas = [PathMeasurement(p[0], p[1], p[2], p[3], p[4], float(np.abs(p[5]))) for p in est]
     return meas

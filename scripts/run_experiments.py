@@ -109,27 +109,27 @@ def slam(trials, num_paths, include_los, angle_noise_deg, delay_noise_ns, seed, 
 
     for _ in trange(trials):
         bs, ue_gt, scat_gt, meas = simulate_single_bs_scene(rng, num_paths=num_paths, include_los=include_los)
+        weights = None
         if use_channel:
             ofdm_cfg = overrides['ofdm']
             ofdm = OFDMSpec(**ofdm_cfg)
             tx = ArraySpec(overrides['txN'])
             rx = ArraySpec(overrides['rxN'])
-            # Use channel to estimate a single dominant path
-            ch_meas = simulate_channel_measurements(rng, bs, ue_gt, scat_gt, include_los, ofdm, tx, rx, snr_db=overrides['snr_db'])
+            ch_meas = simulate_channel_measurements(rng, bs, ue_gt, scat_gt, include_los, ofdm, tx, rx, snr_db=overrides['snr_db'], max_paths=num_paths)
             noisy = ch_meas
+            weights = np.array([m.weight for m in noisy], dtype=float)
         else:
             noisy = add_noise(meas, rng, angle_noise_std_rad=angle_noise, delay_noise_std_s=delay_noise)
         aod = [(m.aod_phi, m.aod_theta) for m in noisy]
         aoa = [(m.aoa_phi, m.aoa_theta) for m in noisy]
         delays = [m.delay_s for m in noisy]
-        R_rel, t_dir, scale, B, points_bs, los_flags = solve_single_bs_slam(aod, aoa, delays, seed=rng.integers(1e9))
+        R_rel, t_dir, scale, B, points_bs, los_flags = solve_single_bs_slam(aod, aoa, delays, seed=rng.integers(1e9), weights=weights)
         r_est_bs = t_dir * scale
         pos_err.append(np.linalg.norm(r_est_bs - (ue_gt.position_w - bs.position_w)))
         rot_err.append(rot_angle_deg(R_rel, ue_gt.rotation_w @ bs.rotation_w.T))
         if include_los:
             scale_true = np.linalg.norm(ue_gt.position_w - bs.position_w)
             scale_rel_err.append(abs(scale - scale_true) / max(scale_true, 1e-6))
-            # Bias only defined with LoS in this simple evaluator
             bias_err_ns.append(abs(B - (np.linalg.norm(ue_gt.position_w - bs.position_w)/299792458.0)) * 1e9)
         else:
             bias_err_ns.append(abs(B) * 1e9)
