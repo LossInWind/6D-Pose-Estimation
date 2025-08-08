@@ -35,7 +35,8 @@ def cli():
 @click.option('--num-bs', default=6, type=int)
 @click.option('--angle-noise-deg', default=0.5, type=float)
 @click.option('--seed', default=0, type=int)
-def aoa_pose(trials, num_bs, angle_noise_deg, seed):
+@click.option('--solver', default='auto', type=click.Choice(['auto', 'pnp', 'lm']))
+def aoa_pose(trials, num_bs, angle_noise_deg, seed, solver):
     rng = np.random.default_rng(seed)
     angle_noise = math.radians(angle_noise_deg)
     pos_err = []
@@ -49,7 +50,7 @@ def aoa_pose(trials, num_bs, angle_noise_deg, seed):
             theta += rng.normal(scale=angle_noise)
             noisy_aoa.append((i, phi, theta))
         bs_positions = np.array([b.position_w for b in bs_list], dtype=float)
-        R_est, r_est = solve_aoa_only_pose(bs_positions, noisy_aoa, seed=rng.integers(1e9))
+        R_est, r_est = solve_aoa_only_pose(bs_positions, noisy_aoa, seed=rng.integers(1e9), solver=solver)
         pos_err.append(np.linalg.norm(r_est - ue_gt.position_w))
         rot_err.append(rot_angle_deg(R_est, ue_gt.rotation_w))
 
@@ -58,6 +59,7 @@ def aoa_pose(trials, num_bs, angle_noise_deg, seed):
         'trials': trials,
         'num_bs': num_bs,
         'angle_noise_deg': angle_noise_deg,
+        'solver': solver,
         'position_rmse_m': float(np.sqrt(np.mean(np.array(pos_err)**2))),
         'rotation_mae_deg': float(np.mean(np.array(rot_err)))
     }
@@ -91,7 +93,7 @@ def slam(trials, num_paths, include_los, angle_noise_deg, delay_noise_ns, seed):
         aod = [(m.aod_phi, m.aod_theta) for m in noisy]
         aoa = [(m.aoa_phi, m.aoa_theta) for m in noisy]
         delays = [m.delay_s for m in noisy]
-        R_rel, t_dir, scale, B, points_bs = solve_single_bs_slam(aod, aoa, delays)
+        R_rel, t_dir, scale, B, points_bs, los_flags = solve_single_bs_slam(aod, aoa, delays, seed=rng.integers(1e9))
         # Reconstruct UE position in BS frame (BS at origin, identity)
         r_est_bs = t_dir * scale
         pos_err.append(np.linalg.norm(r_est_bs - (ue_gt.position_w - bs.position_w)))
