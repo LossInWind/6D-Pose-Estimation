@@ -26,7 +26,6 @@ def reprojection_residual_bearing(params: np.ndarray, bs_positions: np.ndarray, 
     rvec = params[:3]
     r_cam = params[3:6]
     R_c_w = rotation_from_rvec(rvec)
-    # predicted bearing in camera(UE) frame to each BS: R_c_w @ (bs - r_cam)
     rays = (R_c_w @ (bs_positions - r_cam.reshape(1, 3)).T).T
     d_pred = normalize_vector(rays)
     res = (d_pred - d_obs_cam).reshape(-1)
@@ -57,7 +56,7 @@ def solve_aoa_only_pose_lm(bs_positions: np.ndarray, v_or_d_obs: np.ndarray, num
     return R_c_w, r_cam
 
 
-def solve_aoa_only_pose_pnp(bs_positions: np.ndarray, v_obs: np.ndarray, use_ransac: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+def solve_aoa_only_pose_pnp(bs_positions: np.ndarray, v_obs: np.ndarray, use_ransac: bool = True, ransac_reproj_err: float = 1e-3) -> Tuple[np.ndarray, np.ndarray]:
     if cv2 is None:
         return solve_aoa_only_pose_lm(bs_positions, v_obs, residual='virtual')
     obj = bs_positions.astype(np.float64)
@@ -65,14 +64,13 @@ def solve_aoa_only_pose_pnp(bs_positions: np.ndarray, v_obs: np.ndarray, use_ran
     K = np.eye(3, dtype=np.float64)
     dist = np.zeros(5, dtype=np.float64)
     if use_ransac:
-        ok, rvec, tvec, inliers = cv2.solvePnPRansac(obj, img, K, dist, flags=cv2.SOLVEPNP_EPNP, reprojectionError=1e-3, iterationsCount=200)
-        if not ok:
+        ok, rvec, tvec, inliers = cv2.solvePnPRansac(obj, img, K, dist, flags=cv2.SOLVEPNP_EPNP, reprojectionError=ransac_reproj_err, iterationsCount=300)
+        if not ok or inliers is None or len(inliers) < 4:
             return solve_aoa_only_pose_lm(bs_positions, v_obs, residual='virtual')
     else:
         ok, rvec, tvec = cv2.solvePnP(obj, img, K, dist, flags=cv2.SOLVEPNP_EPNP)
         if not ok:
             return solve_aoa_only_pose_lm(bs_positions, v_obs, residual='virtual')
-    # refine via LM in virtual plane
     def fun(x):
         r = x[:3].reshape(3, 1)
         t = x[3:].reshape(3, 1)
@@ -92,11 +90,13 @@ def solve_aoa_only_pose(bs_positions: np.ndarray, aoa_list: List[Tuple[int, floa
     idxs = [i for (i, _, _) in aoa_list]
     pts3d = bs_positions[idxs]
     v_obs = np.array([ao_to_virtual_point(phi, theta) for (_, phi, theta) in aoa_list], dtype=float)
+    if solver == 'auto' and cv2 is not None:
+        R, t = solve_aoa_only_pose_pnp(pts3d, v_obs, use_ransac=True)
+        if R is not None:
+            return R, t
     if residual == 'bearing':
         d_obs = np.array([sph_to_cart(phi, theta) for (_, phi, theta) in aoa_list], dtype=float)
-        # LM on bearing residual
         return solve_aoa_only_pose_lm(pts3d, d_obs, num_restarts=num_restarts, seed=seed, residual='bearing')
-    # else virtual plane
-    if solver == 'pnp' or (solver == 'auto' and cv2 is not None):
+    if solver == 'pnp' and cv2 is not None:
         return solve_aoa_only_pose_pnp(pts3d, v_obs, use_ransac=True)
     return solve_aoa_only_pose_lm(pts3d, v_obs, num_restarts=num_restarts, seed=seed, residual='virtual')

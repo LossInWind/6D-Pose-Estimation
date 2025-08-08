@@ -1,10 +1,10 @@
 {
   "task": "aoa_pose",
-  "trials": 5,
+  "trials": 10,
   "num_bs": 6,
   "angle_noise_deg": 0.1,
   "solver": "auto",
   "preset": "paper",
-  "position_rmse_m": 10.025905784788293,
-  "rotation_mae_deg": 127.91734694876163
+  "position_rmse_m": 3.1151221576368817,
+  "rotation_mae_deg": 83.06277857691624
 }
