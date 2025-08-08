@@ -1,0 +1,8 @@
+{
+  "task": "aoa_pose",
+  "trials": 3,
+  "num_bs": 6,
+  "angle_noise_deg": 0.5,
+  "position_rmse_m": 1.893911932011906,
+  "rotation_mae_deg": 84.37009824329327
+}

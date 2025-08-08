@@ -1,0 +1,7 @@
+numpy>=1.26
+scipy>=1.11
+opencv-python-headless>=4.8
+matplotlib>=3.8
+seaborn>=0.13
+tqdm>=4.66
+click>=8.1

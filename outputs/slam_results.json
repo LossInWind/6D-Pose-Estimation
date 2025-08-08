@@ -1,0 +1,12 @@
+{
+  "task": "single_bs_slam",
+  "trials": 3,
+  "num_paths": 6,
+  "include_los": false,
+  "angle_noise_deg": 0.5,
+  "delay_noise_ns": 2.0,
+  "position_rmse_m": 157.7390825582973,
+  "rotation_mae_deg": 170.47556989840777,
+  "scale_rel_mae": null,
+  "clock_bias_mae_ns": 0.10000000000000002
+}
