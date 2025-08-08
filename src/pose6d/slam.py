@@ -5,6 +5,11 @@ from scipy.optimize import least_squares
 from .projective import ao_to_virtual_point, essential_from_correspondences, decompose_essential, virtual_point_to_bearing, triangulate_midpoint, C0
 from .se3 import normalize_vector
 
+try:
+    import cv2
+except Exception:  # pragma: no cover
+    cv2 = None
+
 
 def sampson_error(E: np.ndarray, v: np.ndarray, nu: np.ndarray) -> float:
     u = np.array([v[0], v[1], 1.0])
@@ -18,6 +23,14 @@ def sampson_error(E: np.ndarray, v: np.ndarray, nu: np.ndarray) -> float:
 
 
 def ransac_essential(vs: np.ndarray, nus: np.ndarray, iters: int = 1000, thresh: float = 1e-3, seed: int = 0) -> Tuple[np.ndarray, np.ndarray]:
+    # If OpenCV available, use findEssentialMat on normalized coords
+    if cv2 is not None and vs.shape[0] >= 5:
+        pts1 = vs.astype(np.float64).reshape(-1, 1, 2)
+        pts2 = nus.astype(np.float64).reshape(-1, 1, 2)
+        E, inliers = cv2.findEssentialMat(pts1, pts2, focal=1.0, pp=(0.0, 0.0), method=cv2.RANSAC, prob=0.999, threshold=thresh)
+        if E is not None and inliers is not None:
+            return E, inliers.ravel().astype(bool)
+    # fallback: custom RANSAC
     rng = np.random.default_rng(seed)
     N = vs.shape[0]
     best_inliers = None
@@ -30,7 +43,6 @@ def ransac_essential(vs: np.ndarray, nus: np.ndarray, iters: int = 1000, thresh:
         if best_inliers is None or inliers.sum() > best_inliers.sum():
             best_inliers = inliers
             best_E = E
-    # re-estimate on inliers
     if best_inliers is None or best_inliers.sum() < 8:
         return essential_from_correspondences(vs, nus), np.ones(N, dtype=bool)
     E_refined = essential_from_correspondences(vs[best_inliers], nus[best_inliers])
@@ -42,8 +54,15 @@ def estimate_relative_pose_from_aod_aoa(aod_list: List[Tuple[float, float]], aoa
     vs = np.array([ao_to_virtual_point(phi, theta) for (phi, theta) in aoa_list], dtype=float)
     nus = np.array([ao_to_virtual_point(phi, theta) for (phi, theta) in aod_list], dtype=float)
     E, inliers = ransac_essential(vs, nus, seed=seed)
+    if cv2 is not None:
+        # recoverPose returns R, t (unit), inliers
+        pts1 = vs[inliers].astype(np.float64).reshape(-1, 1, 2)
+        pts2 = nus[inliers].astype(np.float64).reshape(-1, 1, 2)
+        _, R, t, inl2 = cv2.recoverPose(E, pts1, pts2, focal=1.0, pp=(0.0, 0.0))
+        if R is not None and t is not None:
+            return R.astype(float), normalize_vector(t.reshape(3)), inliers
+    # fallback: decompose and choose by cheirality
     candidates = decompose_essential(E)
-    # pick the candidate with most consistent cheirality for inliers
     best = candidates[0]
     best_score = -np.inf
     for (R, tdir) in candidates:
@@ -66,7 +85,6 @@ def detect_los_paths(R: np.ndarray, t_dir: np.ndarray, aod_list: List[Tuple[floa
         b1 = virtual_point_to_bearing(ao_to_virtual_point(*aod))
         b2 = R @ virtual_point_to_bearing(ao_to_virtual_point(*aoa))
         ang = np.arccos(np.clip(np.dot(b1, -b2), -1.0, 1.0))
-        # additionally ensure agreement with baseline direction
         if ang < thresh and (np.dot(b1, t_dir) > 0 and np.dot(-b2, t_dir) > 0):
             los.append(True)
         else:
@@ -84,9 +102,9 @@ def triangulate_scatterers(R: np.ndarray, t_dir: np.ndarray,
         if los_flags is not None and los_flags[i]:
             points.append(None)
             continue
-        b1 = virtual_point_to_bearing(ao_to_virtual_point(*aod))  # BS frame
+        b1 = virtual_point_to_bearing(ao_to_virtual_point(*aod))
         b2_ue = virtual_point_to_bearing(ao_to_virtual_point(*aoa))
-        b2 = R @ b2_ue  # map to BS frame
+        b2 = R @ b2_ue
         p, _, _ = triangulate_midpoint(c1, b1, c2, b2)
         points.append(p)
     return points

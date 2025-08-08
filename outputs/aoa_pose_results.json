@@ -3,8 +3,8 @@
   "trials": 5,
   "num_bs": 6,
   "angle_noise_deg": 0.1,
-  "solver": "pnp",
+  "solver": "auto",
   "preset": "paper",
-  "position_rmse_m": 220.81995791116475,
-  "rotation_mae_deg": 101.02127524241803
+  "position_rmse_m": 10.025905784788293,
+  "rotation_mae_deg": 127.91734694876163
 }

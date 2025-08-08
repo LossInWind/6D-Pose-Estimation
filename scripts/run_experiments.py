@@ -60,7 +60,7 @@ def aoa_pose(trials, num_bs, angle_noise_deg, seed, solver, preset):
             theta += rng.normal(scale=angle_noise)
             noisy_aoa.append((i, phi, theta))
         bs_positions = np.array([b.position_w for b in bs_list], dtype=float)
-        R_est, r_est = solve_aoa_only_pose(bs_positions, noisy_aoa, seed=rng.integers(1e9), solver=solver)
+        R_est, r_est = solve_aoa_only_pose(bs_positions, noisy_aoa, seed=rng.integers(1e9), solver=solver, residual='bearing')
         pos_err.append(np.linalg.norm(r_est - ue_gt.position_w))
         rot_err.append(rot_angle_deg(R_est, ue_gt.rotation_w))
 
