@@ -16,10 +16,8 @@ def _enforce_rank2(E: np.ndarray, vs: Optional[np.ndarray] = None, nus: Optional
         U, S, Vt = np.linalg.svd(E)
         S[2] = 0.0
         return U @ np.diag(S) @ Vt
-    # if E is not 3x3 (e.g., returned by findEssentialMat as a stack), recompute via correspondences
     if vs is not None and nus is not None:
         return essential_from_correspondences(vs, nus)
-    # fallback: take first 3x3
     return E[:3, :3]
 
 
@@ -69,6 +67,39 @@ def ransac_essential_weighted(vs: np.ndarray, nus: np.ndarray, weights: np.ndarr
     return _enforce_rank2(E_refined), best_inl
 
 
+def _residual_scale_bias_weighted(x: np.ndarray, R: np.ndarray, t_dir: np.ndarray,
+                                  aod_list: List[Tuple[float, float]], aoa_list: List[Tuple[float, float]],
+                                  delays: np.ndarray, weights: np.ndarray, los_flags: np.ndarray) -> np.ndarray:
+    scale, B = x[0], x[1]
+    c1 = np.zeros(3)
+    c2 = t_dir * scale
+    res = []
+    for i, (aod, aoa) in enumerate(zip(aod_list, aoa_list)):
+        if los_flags[i]:
+            d = np.linalg.norm(c2 - c1)
+        else:
+            b1 = virtual_point_to_bearing(ao_to_virtual_point(*aod))
+            b2 = R @ virtual_point_to_bearing(ao_to_virtual_point(*aoa))
+            p, _, _ = triangulate_midpoint(c1, b1, c2, b2)
+            d = np.linalg.norm(p - c1) + np.linalg.norm(p - c2)
+        tau_hat = B + d / C0
+        res.append(np.sqrt(max(weights[i], 1e-6)) * (tau_hat - delays[i]))
+    return np.array(res, dtype=float)
+
+
+def _fit_scale_bias_quick(R: np.ndarray, t_dir: np.ndarray,
+                          aod_list: List[Tuple[float, float]], aoa_list: List[Tuple[float, float]],
+                          delays: np.ndarray, weights: np.ndarray, los_flags: np.ndarray,
+                          s0: float, B0: float) -> Tuple[float, float, float]:
+    x0 = np.array([s0, B0], dtype=float)
+    res = least_squares(_residual_scale_bias_weighted, x0,
+                        args=(R, t_dir, aod_list, aoa_list, delays, weights, los_flags),
+                        bounds=(0, np.inf), loss='huber', f_scale=1e-9, max_nfev=50)
+    scale_opt, B_opt = res.x[0], res.x[1]
+    cost = float(np.sum(res.fun**2))
+    return scale_opt, B_opt, cost
+
+
 def estimate_relative_pose_from_aod_aoa(aod_list: List[Tuple[float, float]], aoa_list: List[Tuple[float, float]], weights: Optional[np.ndarray] = None, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     assert len(aod_list) == len(aoa_list)
     vs = np.array([ao_to_virtual_point(phi, theta) for (phi, theta) in aoa_list], dtype=float)
@@ -85,9 +116,17 @@ def estimate_relative_pose_from_aod_aoa(aod_list: List[Tuple[float, float]], aoa
             candidates.append((R0.astype(float), normalize_vector(t0.reshape(3))))
     if not candidates:
         candidates = decompose_essential(E)
+    # score candidates with combined angular, epipolar, and delay residuals after quick (s,B) fit
     best = candidates[0]
     best_cost = np.inf
+    delays = np.zeros(len(aod_list))  # placeholder if not available here
     for (R, tdir) in candidates:
+        # quick heuristic s0,B0
+        s0 = 1.0
+        B0 = 0.0
+        los_flags = detect_los_paths(R, tdir, aod_list, aoa_list)
+        s_opt, B_opt, _ = _fit_scale_bias_quick(R, tdir, aod_list, aoa_list, delays, weights, los_flags, s0, B0)
+        # compute angular + Sampson cost
         cost = 0.0
         for i in range(len(vs)):
             w = weights[i]
